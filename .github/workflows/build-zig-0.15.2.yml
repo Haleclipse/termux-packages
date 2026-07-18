@@ -40,7 +40,12 @@ jobs:
       - name: Verify zig recipe is 0.15.2
         run: |
           set -euo pipefail
-          grep -E 'TERMUX_PKG_VERSION="0\.15\.2"' packages/zig/build.sh
+          echo "Ref: ${{ github.ref }} SHA: ${{ github.sha }}"
+          if ! grep -E 'TERMUX_PKG_VERSION="0\.15\.2"' packages/zig/build.sh; then
+            echo "::error::Run this workflow with ref=build/zig-0.15.2 (0.15.2 recipe)."
+            grep TERMUX_PKG_VERSION packages/zig/build.sh || true
+            exit 1
+          fi
           test -d packages/zig/0.15.2
           echo "Recipe OK:"
           grep -E 'TERMUX_PKG_(VERSION|SRCURL|SHA256)=' packages/zig/build.sh
