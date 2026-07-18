@@ -1,0 +1,126 @@
+# Build Termux zig 0.15.2 for aarch64 and upload the .deb.
+# zig is in scripts/big-pkgs.list → build on the runner host (not Docker),
+# matching termux/termux-packages .github/workflows/packages.yml big-pkg path.
+#
+# Repo: fork of termux/termux-packages
+# Branch tip should be at (or based on) commit that packages Zig 0.15.2:
+#   6bd499e7135a0a06a524087ade4dc58a607a2cfc  bump(main/zig): 0.15.2
+#
+# Trigger: Actions → "Build zig 0.15.2 (aarch64)" → Run workflow
+# Or: gh workflow run "Build zig 0.15.2 (aarch64)" --ref build/zig-0.15.2
+
+name: Build zig 0.15.2 (aarch64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Pass -f to force rebuild"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-zig-0.15.2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-zig-aarch64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Verify zig recipe is 0.15.2
+        run: |
+          set -euo pipefail
+          echo "Ref: ${{ github.ref }} SHA: ${{ github.sha }}"
+          if ! grep -E 'TERMUX_PKG_VERSION="0\.15\.2"' packages/zig/build.sh; then
+            echo "::error::Run this workflow with ref=build/zig-0.15.2 (0.15.2 recipe)."
+            grep TERMUX_PKG_VERSION packages/zig/build.sh || true
+            exit 1
+          fi
+          test -d packages/zig/0.15.2
+          echo "Recipe OK:"
+          grep -E 'TERMUX_PKG_(VERSION|SRCURL|SHA256)=' packages/zig/build.sh
+
+      - name: Enable zram (official big-pkg path)
+        uses: ./.github/actions/zram
+        with:
+          algorithm: zstd
+          size: 16G
+          priority: 100
+          device_name: /dev/zram0
+
+      - name: Free disk space + host build deps
+        run: |
+          set -euo pipefail
+          # Same spirit as packages.yml when docker-build=false
+          ./scripts/setup-ubuntu.sh
+          unset NDK ANDROID_HOME || true
+          ./scripts/setup-android-sdk.sh
+          rm -f "${HOME}/lib/ndk-"*.zip "${HOME}/lib/sdk-"*.zip || true
+          sudo apt-get install -y ninja-build
+          if [ -x ./scripts/free-space.sh ]; then
+            ./scripts/free-space.sh || true
+          fi
+          # Extra free space commonly needed for zig bootstrap
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/powershell /usr/share/swift || true
+          df -h
+
+      - name: Build zig (aarch64, host / big-pkg)
+        env:
+          # Reduce chance of OOM; CI still aims <6h with ninja (build.patch)
+          TERMUX_PKG_MAKE_PROCESSES: "2"
+        run: |
+          set -euo pipefail
+          unset NDK ANDROID_HOME || true
+          if [ "${{ inputs.force }}" = "true" ]; then
+            echo "Running: ./build-package.sh -f -I -C -a aarch64 zig"
+            ./build-package.sh -f -I -C -a aarch64 zig
+          else
+            echo "Running: ./build-package.sh -I -C -a aarch64 zig"
+            ./build-package.sh -I -C -a aarch64 zig
+          fi
+
+      - name: Collect deb
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p debs
+          if [ -d output ]; then
+            find output -type f -name 'zig_*.deb' -print -exec cp -v {} debs/ \;
+          fi
+          ls -lah debs/ || true
+          find debs -type f -name '*.deb' -exec sha256sum {} \; | tee checksums.txt
+          test -n "$(find debs -name 'zig_*.deb' -print -quit)"
+
+      - name: Upload zig deb
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zig-0.15.2-aarch64-deb
+          path: |
+            debs/zig_*.deb
+            checksums.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zig-0.15.2-build-logs
+          path: |
+            **/*.log
+            **/build.log
+            termux-build/**
+          if-no-files-found: ignore
+          retention-days: 7
